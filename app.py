@@ -1,6 +1,7 @@
 import csv
 from pathlib import Path
 
+import networkx as nx
 import streamlit as st
 
 st.set_page_config(
@@ -11,7 +12,7 @@ st.set_page_config(
 )
 
 COMPONENTS_PATH = Path(__file__).resolve().parent / "data" / "components.csv"
-NO_DATA_MESSAGE = "Enter a change summary to begin impact analysis."
+NO_DATA_MESSAGE = "Enter a change summary and component to begin impact analysis."
 
 
 def load_component_metadata():
@@ -22,15 +23,6 @@ def load_component_metadata():
         return [row for row in csv.DictReader(handle) if row.get("component_name")]
 
 
-def risk_style(risk):
-    palette = {
-        "High": {"bg": "rgba(239,68,68,0.14)", "color": "#dc2626", "icon": "🔴"},
-        "Medium": {"bg": "rgba(245,158,11,0.14)", "color": "#d97706", "icon": "🟡"},
-        "Low": {"bg": "rgba(34,197,94,0.14)", "color": "#16a34a", "icon": "🟢"},
-    }
-    return palette.get(risk, palette["Medium"])
-
-
 def normalize_risk(value):
     risk = str(value or "Medium").strip().title()
     if risk not in {"High", "Medium", "Low"}:
@@ -39,73 +31,42 @@ def normalize_risk(value):
 
 
 def build_dependency_graph(rows):
-    graph = {}
-    reverse_graph = {}
+    graph = nx.DiGraph()
     for row in rows:
         component = str(row.get("component_name", "")).strip()
         dependency = str(row.get("dependency", "")).strip()
         if component:
-            graph.setdefault(component, [])
+            graph.add_node(component)
             if dependency and dependency.lower() != "none":
-                graph[component].append(dependency)
-                reverse_graph.setdefault(dependency, []).append(component)
-    return graph, reverse_graph
+                graph.add_edge(component, dependency)
+    return graph
 
 
-def find_direct_matches(summary_text, rows):
-    text = (summary_text or "").lower()
-    alias_map = {
-        "Authentication": ["authentication", "auth", "login", "token", "session", "identity", "mfa", "two-factor", "two factor"],
-        "User Management": ["user management", "user", "profile", "role", "account", "permission", "access"],
-        "Payment Gateway": ["payment", "billing", "checkout", "invoice", "transaction", "upi"],
-        "Dashboard": ["dashboard", "frontend", "ui", "portal", "screen", "view"],
-        "Notification": ["notification", "email", "sms", "message", "alert", "push"],
-        "Database": ["database", "db", "data", "schema", "storage", "migration", "query"],
-        "API Gateway": ["api", "gateway", "endpoint", "integration", "service", "request"],
-        "Reporting": ["report", "analytics", "metrics", "insight", "export"],
-    }
+def collect_dependency_chain(component_name, graph):
+    if not component_name or component_name not in graph:
+        return []
 
-    matches = []
-    for row in rows:
-        component_name = str(row.get("component_name", "")).strip()
-        aliases = alias_map.get(component_name, [component_name.lower()])
-        if any(alias in text for alias in aliases):
-            matches.append(component_name)
-    return matches
-
-
-def collect_dependency_chain(component_name, rows, visited=None):
-    if visited is None:
-        visited = set()
-
-    row_map = {str(row.get("component_name", "")).strip(): row for row in rows if row.get("component_name")}
     chain = []
     current = component_name
-    while current and current not in visited:
-        visited.add(current)
+    seen = set()
+    while current and current not in seen:
         chain.append(current)
-        dependency = str(row_map.get(current, {}).get("dependency", "")).strip()
-        if dependency and dependency.lower() != "none":
-            current = dependency
-        else:
-            current = ""
+        seen.add(current)
+        successors = list(graph.successors(current))
+        if not successors:
+            break
+        current = successors[0]
     return chain
 
 
-def collect_downstream_chain(component_name, rows, reverse_graph, visited=None):
-    if visited is None:
-        visited = set()
-    queue = [component_name]
-    downstream = []
+def collect_downstream_chain(component_name, graph):
+    if not component_name or component_name not in graph:
+        return []
 
-    while queue:
-        component = queue.pop(0)
-        for dependent in reverse_graph.get(component, []):
-            if dependent not in visited:
-                visited.add(dependent)
-                downstream.append(dependent)
-                queue.append(dependent)
-    return downstream
+    reverse_graph = graph.reverse()
+    if component_name not in reverse_graph:
+        return []
+    return sorted(nx.descendants(reverse_graph, component_name))
 
 
 def analyze_change_summary(change_summary, selected_component):
@@ -125,14 +86,14 @@ def analyze_change_summary(change_summary, selected_component):
             "dependency_chain": [],
             "risk_level": "Medium",
             "impact_score": 0,
-            "why": "The dependency CSV could not be loaded, so no analysis could be built.",
-            "factors": ["CSV data is missing or unreadable"],
+            "why": "No dependency metadata was available in the CSV.",
+            "factors": ["CSV data is missing or empty"],
             "component_reasons": {
-                selected_component: "The chosen component was provided, but the dependency data could not be loaded from the project CSV."
+                selected_component: "The selected component was provided, but dependency metadata could not be loaded from the project data file."
             },
             "mitigation": [
-                "Validate the CSV file exists and contains dependency metadata.",
-                "Retry once the project data source is available."
+                "Confirm that the CSV file exists and contains component metadata.",
+                "Retry after validating the project dependency source."
             ],
         }
 
@@ -146,14 +107,14 @@ def analyze_change_summary(change_summary, selected_component):
             "dependency_chain": [],
             "risk_level": "Medium",
             "impact_score": 0,
-            "why": "The selected component is not present in the loaded dependency model.",
-            "factors": ["Selected component does not exist in the project architecture"],
+            "why": "The selected component does not exist in the loaded project architecture.",
+            "factors": ["Selected component is not found in the dependency model"],
             "component_reasons": {
-                selected_component: "The selected component does not exist in the CSV dependency model, so no valid path can be resolved."
+                selected_component: "The selected component was not found in the CSV dependency model, so no dependency path can be resolved."
             },
             "mitigation": [
-                "Use an exact component name from the project architecture.",
-                "Check the component name against the CSV file before running the analysis again."
+                "Choose a component from the project architecture.",
+                "Verify the component name matches the CSV record exactly."
             ],
         }
 
@@ -177,7 +138,7 @@ def analyze_change_summary(change_summary, selected_component):
 
     component_reasons = {
         selected_component: (
-            f"{selected_component} is directly affected because it is the exact component selected by the user and it sits on the active change path."
+            f"{selected_component} is directly affected because it is the exact component selected by the user and it is the active change target."
         )
     }
 
@@ -186,23 +147,23 @@ def analyze_change_summary(change_summary, selected_component):
         dependency = str(item_row.get("dependency", "")).strip()
         if dependency and dependency.lower() != "none":
             component_reasons[item] = (
-                f"{item} is indirectly affected because it depends on {dependency}, which is connected to {selected_component} in the project dependency model."
+                f"{item} is indirectly affected because it depends on {dependency}, which sits on the same path as {selected_component}."
             )
         else:
             component_reasons[item] = f"{item} is downstream of {selected_component} and therefore exposed to secondary operational impact."
 
     factors = [
-        "User-selected component matches the live change scope",
+        "User-selected component matches the active change scope",
         f"{len(indirect_list)} downstream service(s) are reachable in the dependency graph",
     ]
     if risk_level == "High":
         factors.append("Critical service path includes a high-impact dependency chain")
 
     mitigation = [
-        "Stage the rollout to isolate the selected component before broader deployment.",
+        "Stage the rollout to isolate the selected component before wider deployment.",
         "Run regression tests on the direct component and each downstream dependent service.",
         "Keep a rollback plan ready for the highest-risk path in the dependency chain.",
-        "Monitor authentication, API, and data integrity signals during rollout."
+        "Monitor API, authentication, and data integrity signals during release."
     ]
 
     why = " ".join([
@@ -230,32 +191,29 @@ def apply_global_styles():
         """
         <style>
         :root {
-            --bg-top: #f6f2ff;
-            --bg-mid: #edf5ff;
-            --bg-soft: #f4f9ff;
-            --panel: rgba(255,255,255,0.64);
-            --panel-strong: rgba(255,255,255,0.82);
-            --border: rgba(116, 129, 166, 0.18);
-            --text: #1a1b2f;
-            --muted: #5d6782;
-            --primary: #4f46e5;
-            --primary-2: #7c83ff;
-            --blue: #59a6ff;
-            --lavender: #d9c9ff;
-            --cyan: #b7e4ff;
-            --green: #35b87f;
-            --amber: #f5b544;
-            --red: #f26464;
-            --shadow: 0 18px 48px rgba(71, 85, 105, 0.12);
+            --bg-1: #070d1d;
+            --bg-2: #0d1830;
+            --bg-3: #131f3a;
+            --panel: rgba(15, 23, 42, 0.62);
+            --card: rgba(14, 20, 33, 0.75);
+            --text: #eaf2ff;
+            --muted: #b7c5df;
+            --line: rgba(148, 163, 184, 0.18);
+            --blue: #61a8ff;
+            --purple: #8d7dff;
+            --green: #7ae0a9;
+            --amber: #f7c66b;
+            --red: #ff7d7d;
+            --shadow: 0 24px 60px rgba(5, 8, 18, 0.5);
         }
 
-        .stApp {
+        html, body, [data-testid="stAppViewContainer"], .main, .stApp {
             background:
-                radial-gradient(circle at 15% 15%, rgba(144, 118, 255, 0.20), transparent 21%),
-                radial-gradient(circle at 80% 8%, rgba(125, 211, 252, 0.18), transparent 18%),
-                radial-gradient(circle at 75% 70%, rgba(216, 196, 255, 0.28), transparent 25%),
-                linear-gradient(180deg, var(--bg-top) 0%, var(--bg-mid) 100%);
-            position: relative;
+                radial-gradient(circle at 15% 15%, rgba(141, 125, 255, 0.14), transparent 20%),
+                radial-gradient(circle at 78% 12%, rgba(97, 168, 255, 0.18), transparent 22%),
+                radial-gradient(circle at 55% 80%, rgba(138, 164, 255, 0.12), transparent 28%),
+                linear-gradient(140deg, var(--bg-1) 0%, var(--bg-2) 38%, var(--bg-3) 100%);
+            min-height: 100vh;
         }
 
         .stApp::before {
@@ -263,9 +221,9 @@ def apply_global_styles():
             position: fixed;
             inset: 0;
             background:
-                radial-gradient(circle at 10% 25%, rgba(255,255,255,0.16), transparent 18%),
-                radial-gradient(circle at 60% 55%, rgba(126, 107, 255, 0.10), transparent 25%),
-                linear-gradient(135deg, rgba(255,255,255,0.18), transparent 35%, rgba(155, 135, 255, 0.08));
+                linear-gradient(rgba(255,255,255,0.02), rgba(255,255,255,0.02)),
+                repeating-linear-gradient(90deg, rgba(141,125,255,0.06) 0, rgba(141,125,255,0.06) 1px, transparent 1px, transparent 52px),
+                repeating-linear-gradient(0deg, rgba(97,168,255,0.05) 0, rgba(97,168,255,0.05) 1px, transparent 1px, transparent 52px);
             pointer-events: none;
             z-index: 0;
         }
@@ -274,52 +232,61 @@ def apply_global_styles():
             position: relative;
             z-index: 1;
             padding-top: 2rem;
-            padding-bottom: 3rem;
+            padding-bottom: 2.5rem;
         }
 
         .stSidebar {
-            background: rgba(255,255,255,0.42);
+            background: rgba(9, 14, 24, 0.72);
             backdrop-filter: blur(16px);
             -webkit-backdrop-filter: blur(16px);
-            border-right: 1px solid rgba(151, 162, 193, 0.18);
-        }
-
-        .stSidebar .sidebar-content {
-            padding-top: 1.25rem;
-        }
-
-        div[data-testid="stSidebarNav"] {
-            background: rgba(255,255,255,0.26);
+            border-right: 1px solid rgba(148,163,184,0.12);
         }
 
         .brand-mark {
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
-            padding: 0.56rem 0.7rem;
-            border-radius: 999px;
+            gap: 0.55rem;
             font-weight: 800;
-            color: #342d8a;
-            background: rgba(103, 110, 255, 0.10);
-            border: 1px solid rgba(103, 110, 255, 0.18);
-            width: fit-content;
+            letter-spacing: -0.04em;
+            color: #edf3ff;
+            background: linear-gradient(135deg, rgba(97,168,255,0.18), rgba(141,125,255,0.22));
+            border: 1px solid rgba(255,255,255,0.12);
+            border-radius: 999px;
+            padding: 0.56rem 0.8rem;
             margin-bottom: 0.8rem;
         }
 
         .brand-subtitle {
             color: var(--muted);
-            font-size: 0.76rem;
-            letter-spacing: 0.08em;
+            font-size: 0.7rem;
+            letter-spacing: 0.1em;
             text-transform: uppercase;
-            margin-bottom: 1.2rem;
+            margin-bottom: 1rem;
+        }
+
+        div[data-testid="stButton"] > button {
+            border: 1px solid rgba(148,163,184,0.18);
+            background: rgba(15,23,42,0.42);
+            color: var(--text);
+            border-radius: 12px;
+            padding: 0.65rem 0.85rem;
+            font-weight: 600;
+            transition: 0.2s ease;
+        }
+
+        div[data-testid="stButton"] > button:hover {
+            background: rgba(97,168,255,0.12);
+            border-color: rgba(97,168,255,0.38);
+            box-shadow: 0 12px 24px rgba(97,168,255,0.12);
+            transform: translateY(-1px);
         }
 
         .page-shell {
-            background: rgba(255,255,255,0.46);
-            border: 1px solid var(--border);
-            border-radius: 26px;
+            background: rgba(15, 23, 42, 0.56);
+            border: 1px solid rgba(148,163,184,0.14);
+            border-radius: 28px;
+            padding: 1.5rem 1.4rem;
             box-shadow: var(--shadow);
-            padding: 1.4rem 1.4rem 1.1rem;
             backdrop-filter: blur(14px);
             -webkit-backdrop-filter: blur(14px);
             margin-bottom: 1rem;
@@ -328,48 +295,47 @@ def apply_global_styles():
         .page-kicker {
             display: inline-block;
             font-size: 0.72rem;
-            letter-spacing: 0.10em;
+            letter-spacing: 0.13em;
             text-transform: uppercase;
-            color: #6c77a5;
+            color: #a6b9ff;
             font-weight: 700;
-            margin-bottom: 0.65rem;
+            margin-bottom: 0.6rem;
         }
 
         .page-title {
             color: var(--text);
-            font-size: clamp(2rem, 2.8vw, 3rem);
-            line-height: 1.05;
-            letter-spacing: -0.06em;
+            font-size: clamp(2rem, 2.5vw, 3rem);
             font-weight: 800;
+            letter-spacing: -0.06em;
+            line-height: 1.08;
             margin: 0;
         }
 
         .page-copy {
             color: var(--muted);
-            margin-top: 0.65rem;
-            margin-bottom: 1rem;
-            font-size: 1rem;
+            margin-top: 0.6rem;
+            margin-bottom: 0.8rem;
         }
 
         .metric-card {
-            background: var(--panel-strong);
-            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid rgba(148,163,184,0.14);
             border-radius: 22px;
-            padding: 1rem 1.1rem 1.2rem;
+            padding: 1rem 1.1rem;
             min-height: 160px;
             box-shadow: var(--shadow);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
         }
         .metric-blue { border-top: 4px solid var(--blue); }
         .metric-red { border-top: 4px solid var(--red); }
         .metric-amber { border-top: 4px solid var(--amber); }
         .metric-green { border-top: 4px solid var(--green); }
         .metric-label {
-            font-size: 0.72rem;
             color: var(--muted);
             text-transform: uppercase;
             letter-spacing: 0.08em;
+            font-size: 0.7rem;
             font-weight: 700;
             margin-bottom: 0.7rem;
         }
@@ -377,7 +343,7 @@ def apply_global_styles():
             font-size: clamp(1.9rem, 2vw, 2.6rem);
             font-weight: 800;
             color: var(--text);
-            letter-spacing: -0.06em;
+            letter-spacing: -0.05em;
         }
         .metric-caption {
             margin-top: 0.8rem;
@@ -386,52 +352,11 @@ def apply_global_styles():
         }
 
         .panel {
-            background: var(--panel);
-            border: 1px solid var(--border);
+            background: rgba(15, 23, 42, 0.58);
+            border: 1px solid rgba(148,163,184,0.14);
             border-radius: 22px;
-            padding: 1.1rem 1.2rem;
+            padding: 1rem 1.2rem;
             box-shadow: var(--shadow);
-            backdrop-filter: blur(12px);
-            -webkit-backdrop-filter: blur(12px);
-        }
-
-        .pill {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.45rem;
-            padding: 0.5rem 0.9rem;
-            border-radius: 999px;
-            font-size: 0.74rem;
-            font-weight: 700;
-            background: rgba(79, 70, 229, 0.08);
-            border: 1px solid rgba(79, 70, 229, 0.12);
-            color: #312e81;
-        }
-
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.35rem;
-            padding: 0.48rem 0.8rem;
-            border-radius: 999px;
-            font-size: 0.76rem;
-            font-weight: 700;
-        }
-
-        div[data-testid="stButton"] > button {
-            background: rgba(255,255,255,0.32);
-            border: 1px solid rgba(148,163,184,0.22);
-            border-radius: 12px;
-            color: var(--text);
-            font-weight: 600;
-            padding: 0.6rem 0.9rem;
-            transition: 0.2s ease;
-        }
-
-        div[data-testid="stButton"] > button:hover {
-            border-color: rgba(79,70,229,0.32);
-            box-shadow: 0 8px 24px rgba(79,70,229,0.10);
-            transform: translateY(-1px);
         }
 
         .login-shell {
@@ -440,85 +365,66 @@ def apply_global_styles():
             align-items: center;
             justify-content: center;
             background:
-                radial-gradient(circle at 20% 20%, rgba(148, 163, 255, 0.16), transparent 20%),
-                radial-gradient(circle at 80% 30%, rgba(125, 211, 252, 0.18), transparent 18%),
-                radial-gradient(circle at 60% 80%, rgba(217, 201, 255, 0.18), transparent 24%),
-                linear-gradient(180deg, rgba(249, 247, 255, 0.92), rgba(236, 245, 255, 0.90));
+                radial-gradient(circle at 20% 15%, rgba(141,125,255,0.16), transparent 22%),
+                radial-gradient(circle at 80% 18%, rgba(97,168,255,0.18), transparent 18%),
+                linear-gradient(135deg, rgba(9,14,24,0.82), rgba(17,24,39,0.86));
         }
 
         .login-card {
-            width: min(100%, 480px);
-            background: rgba(255,255,255,0.72);
-            border: 1px solid rgba(148,163,184,0.22);
-            border-radius: 30px;
-            padding: 2.2rem 2rem 1.4rem;
-            box-shadow: 0 16px 58px rgba(59, 68, 105, 0.14);
-            backdrop-filter: blur(14px);
-            -webkit-backdrop-filter: blur(14px);
+            width: min(100%, 470px);
+            background: rgba(15, 23, 42, 0.8);
+            border: 1px solid rgba(148,163,184,0.16);
+            border-radius: 28px;
+            box-shadow: var(--shadow);
+            padding: 2rem 1.8rem 1.5rem;
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
         }
 
         .login-badge {
             display: inline-flex;
             align-items: center;
             gap: 0.55rem;
-            font-weight: 800;
-            color: #2d318d;
-            background: rgba(79, 70, 229, 0.08);
-            border: 1px solid rgba(79,70,229,0.14);
+            color: #edf3ff;
+            background: linear-gradient(135deg, rgba(97,168,255,0.16), rgba(141,125,255,0.18));
+            border: 1px solid rgba(148,163,184,0.15);
             border-radius: 999px;
-            padding: 0.52rem 0.8rem;
+            padding: 0.55rem 0.8rem;
+            font-weight: 800;
             margin-bottom: 1rem;
         }
 
         .login-title {
-            color: var(--text);
-            font-size: 2.2rem;
+            font-size: 2.25rem;
             font-weight: 800;
             letter-spacing: -0.06em;
+            color: var(--text);
             margin: 0 0 0.5rem;
         }
 
         .login-copy {
             color: var(--muted);
-            margin-bottom: 1.1rem;
-        }
-
-        .list-stack {
-            display: grid;
-            gap: 0.65rem;
-        }
-
-        .mini-box {
-            background: rgba(232,239,255,0.55);
-            border: 1px solid rgba(147, 160, 196, 0.18);
-            border-radius: 18px;
-            padding: 0.8rem 0.9rem;
-            color: var(--text);
+            margin-bottom: 1rem;
         }
 
         .footer {
             text-align: center;
-            color: #7a86a7;
+            color: #b6c4de;
             font-size: 0.8rem;
             padding-top: 1rem;
         }
 
         .stTextInput > div > div > input,
-        .stTextArea > div > div > textarea {
-            background: rgba(255,255,255,0.46);
-            border: 1px solid rgba(148,163,184,0.22);
+        .stTextArea > div > div > textarea,
+        .stSelectbox > div > div {
+            background: rgba(15, 23, 42, 0.55);
+            border: 1px solid rgba(148,163,184,0.18);
             border-radius: 14px;
             color: var(--text);
         }
 
         .stTextArea textarea {
             min-height: 180px !important;
-        }
-
-        @media (max-width: 768px) {
-            .page-shell {
-                padding: 1rem;
-            }
         }
         </style>
         """,
@@ -556,16 +462,17 @@ def login_page():
     with st.form("login_form"):
         st.text_input("Email / Username", key="login_username", placeholder="name@company.com")
         st.text_input("Password", type="password", key="login_password", placeholder="Enter your password")
-        submit = st.form_submit_button("Login", use_container_width=True)
+        submitted = st.form_submit_button("Login", use_container_width=True)
 
-        if submit:
+        if submitted:
             username = st.session_state.get("login_username", "").strip()
             password = st.session_state.get("login_password", "").strip()
             if not username or not password:
                 st.error("Please enter both your username/email and password.")
             else:
                 st.session_state.authenticated = True
-                st.session_state.page = "Dashboard"
+                st.session_state.page = "Change Analysis"
+                st.session_state.analysis = None
                 st.rerun()
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -581,8 +488,10 @@ def app_shell():
             "Dashboard",
             "Change Analysis",
             "Impact Results",
+            "Dependency Graph",
             "Risk Analysis",
             "Risk Mitigation",
+            "AI Prediction",
             "Reports",
         ]
 
@@ -594,7 +503,7 @@ def app_shell():
 
         if st.button("Logout", use_container_width=True, key="logout_btn"):
             st.session_state.authenticated = False
-            st.session_state.page = "Dashboard"
+            st.session_state.page = "Change Analysis"
             st.session_state.analysis = None
             st.rerun()
 
@@ -603,26 +512,26 @@ def render_dashboard():
     st.markdown('<div class="page-shell">', unsafe_allow_html=True)
     st.markdown('<div class="page-kicker">Overview</div>', unsafe_allow_html=True)
     st.markdown('<div class="page-title">Impact.AI</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-copy">Engineering change intelligence for service impact visibility and controlled delivery.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-copy">Engineering change intelligence for dependency-aware rollout visibility and controlled delivery.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    analysis = st.session_state.get("analysis")
-    overview_cols = st.columns(4)
-
-    with overview_cols[0]:
+    columns = st.columns(4)
+    with columns[0]:
         render_metric_card("Systems", "8", "Architecture nodes in scope", "blue")
-    with overview_cols[1]:
-        render_metric_card("Critical Paths", "4", "Core service dependencies tracked", "red")
-    with overview_cols[2]:
+    with columns[1]:
+        render_metric_card("Critical Paths", "4", "Core dependency paths tracked", "red")
+    with columns[2]:
         render_metric_card("Risk Focus", "Medium", "Current project posture", "amber")
-    with overview_cols[3]:
+    with columns[3]:
         render_metric_card("Deploys", "Safe", "Controlled delivery model", "green")
 
+    analysis = st.session_state.get("analysis")
     if analysis:
         st.markdown("### Latest Analysis Snapshot")
         st.markdown(
             f"<div class='panel'>"
             f"<strong>Change Summary:</strong> {analysis['change_summary']}<br><br>"
+            f"<strong>Selected Component:</strong> {analysis['selected_component']}<br><br>"
             f"<strong>Risk Level:</strong> {analysis['risk_level']} &nbsp;&nbsp;"
             f"<strong>Impact Score:</strong> {analysis['impact_score']}%"
             f"</div>",
@@ -630,7 +539,7 @@ def render_dashboard():
         )
     else:
         st.markdown("### Ready to analyze")
-        st.info("No change has been analyzed yet. Use the Change Analysis page to describe a new engineering update.")
+        st.info("No change has been analyzed yet. Use the Change Analysis page to describe the next engineering update.")
 
 
 def render_change_analysis_page():
@@ -644,9 +553,16 @@ def render_change_analysis_page():
         change_summary = st.text_area(
             label="",
             value="",
-            placeholder="I want to add OTP-based login to my website.",
-            help="Use a brief description of the planned software or website update.",
+            placeholder="I want to move the login flow from password-based authentication to OTP verification.",
+            help="Type the actual change you want to introduce.",
             label_visibility="collapsed",
+        )
+
+        component_name = st.text_input(
+            "Component to change",
+            value="",
+            placeholder="Authentication",
+            help="Type the exact component affected by the change."
         )
 
         submitted = st.form_submit_button("Analyze Impact", use_container_width=True)
@@ -654,8 +570,10 @@ def render_change_analysis_page():
         if submitted:
             if not change_summary.strip():
                 st.warning("Please enter a change summary before analyzing.")
+            elif not component_name.strip():
+                st.warning("Please type the component affected by the change.")
             else:
-                st.session_state.analysis = analyze_change_summary(change_summary)
+                st.session_state.analysis = analyze_change_summary(change_summary, component_name)
                 st.session_state.page = "Impact Results"
                 st.rerun()
 
@@ -668,15 +586,16 @@ def render_impact_results_page():
 
     st.markdown('<div class="page-shell">', unsafe_allow_html=True)
     st.markdown('<div class="page-kicker">Impact Results</div>', unsafe_allow_html=True)
-    st.markdown('<div class="page-title">Affected service and dependency paths</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Affected components and dependency impact</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    st.markdown("### Change Summary")
+    st.write(analysis["change_summary"])
+    st.write(f"**Selected Component:** {analysis['selected_component']}")
+
     st.markdown("### Directly affected components")
-    if analysis["directly_affected"]:
-        for item in analysis["directly_affected"]:
-            st.write(f"• {item}")
-    else:
-        st.info("No directly affected components were detected.")
+    for item in analysis["directly_affected"]:
+        st.write(f"• {item}")
 
     st.markdown("### Indirectly affected components")
     if analysis["indirectly_affected"]:
@@ -687,12 +606,30 @@ def render_impact_results_page():
 
     st.markdown("### Dependency chain")
     if analysis["dependency_chain"]:
-        st.code(" → ".join(analysis["dependency_chain"]))
+        st.code(" -> ".join(analysis["dependency_chain"]))
     else:
-        st.info("No dependency chain was available for the current summary.")
+        st.info("No dependency chain was available for the selected component.")
 
-    st.markdown("### Explanation of affected relationships")
-    st.write(analysis["why"])
+    st.markdown("### Why those components are affected")
+    for component, reason in analysis["component_reasons"].items():
+        st.write(f"• **{component}:** {reason}")
+
+
+def render_dependency_graph_page():
+    analysis = st.session_state.get("analysis")
+    if not analysis:
+        st.info(NO_DATA_MESSAGE)
+        return
+
+    st.markdown('<div class="page-shell">', unsafe_allow_html=True)
+    st.markdown('<div class="page-kicker">Dependency Graph</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Architecture path for the selected component</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.code(" -> ".join(analysis["dependency_chain"]))
+    st.write(f"**Selected component:** {analysis['selected_component']}")
+    st.write(f"**Directly affected:** {', '.join(analysis['directly_affected'])}")
+    st.write(f"**Indirectly affected:** {', '.join(analysis['indirectly_affected']) or 'None'}")
 
 
 def render_risk_analysis_page():
@@ -712,15 +649,12 @@ def render_risk_analysis_page():
     with cols[1]:
         render_metric_card("Impact Score", f"{analysis['impact_score']}%", "Estimated business and system impact", "green")
 
-    st.markdown("### Why the risk was calculated")
-    st.write(analysis["why"])
+    st.markdown("### Risk factors")
+    for item in analysis["factors"]:
+        st.write(f"• {item}")
 
-    st.markdown("### Factors contributing to the risk")
-    if analysis.get("factors"):
-        for factor in analysis["factors"]:
-            st.write(f"• {factor}")
-    else:
-        st.info("No additional factor data is available for the current analysis.")
+    st.markdown("### Explanation of calculated risk")
+    st.write(analysis["why"])
 
 
 def render_risk_mitigation_page():
@@ -734,24 +668,40 @@ def render_risk_mitigation_page():
     st.markdown('<div class="page-title">Reduce rollout risk and protect service continuity</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown("### How to reduce the identified risk")
-    if analysis.get("mitigation"):
-        for step in analysis["mitigation"]:
-            st.write(f"• {step}")
-    else:
-        st.info("No mitigation guidance is available for the current analysis.")
+    st.markdown("### Ways to reduce risk")
+    for step in analysis.get("mitigation", []):
+        st.write(f"• {step}")
 
     st.markdown("### Testing recommendations")
-    st.write("• Run focused regression checks on every directly affected component and adjacent dependency boundary.")
-    st.write("• Validate login, transaction, data access, and notification flows before production release.")
+    st.write("• Run targeted regression tests on the selected component and each downstream dependent service.")
+    st.write("• Validate login, API integration, data flow, and notification behavior before production release.")
 
-    st.markdown("### Rollback recommendations")
-    st.write("• Keep a quick rollback path or feature flag to disable the change without affecting unrelated services.")
+    st.markdown("### Rollback plan")
+    st.write("• Keep a feature toggle or rollback path ready for the changed component.")
     st.write("• Maintain a hotfix plan focused on the highest-risk dependency path.")
 
     st.markdown("### Safe deployment recommendations")
-    st.write("• Deploy in stages with monitoring on the dependency chain before full release.")
-    st.write("• Confirm operational telemetry, failure alerts, and user-impact signals before expanding rollout.")
+    st.write("• Roll out in stages and monitor dependency behavior before expanding usage.")
+    st.write("• Confirm telemetry, alerts, and user-impact signals before final deployment.")
+
+
+def render_ai_prediction_page():
+    analysis = st.session_state.get("analysis")
+    if not analysis:
+        st.info(NO_DATA_MESSAGE)
+        return
+
+    st.markdown('<div class="page-shell">', unsafe_allow_html=True)
+    st.markdown('<div class="page-kicker">AI Prediction</div>', unsafe_allow_html=True)
+    st.markdown('<div class="page-title">Predicted change impact outlook</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+    st.write(f"**Selected Component:** {analysis['selected_component']}")
+    st.write(f"**Change Summary:** {analysis['change_summary']}")
+    st.write(f"**Directly Affected:** {', '.join(analysis['directly_affected']) or 'None'}")
+    st.write(f"**Indirectly Affected:** {', '.join(analysis['indirectly_affected']) or 'None'}")
+    st.write(f"**Risk Level:** {analysis['risk_level']}")
+    st.write(f"**Impact Score:** {analysis['impact_score']}%")
 
 
 def render_reports_page():
@@ -767,12 +717,13 @@ def render_reports_page():
 
     report_text = (
         f"Change Summary: {analysis['change_summary']}\n"
+        f"Selected Component: {analysis['selected_component']}\n"
         f"Directly Affected: {', '.join(analysis['directly_affected']) or 'None'}\n"
         f"Indirectly Affected: {', '.join(analysis['indirectly_affected']) or 'None'}\n"
-        f"Dependency Chain: {' → '.join(analysis['dependency_chain']) if analysis['dependency_chain'] else 'Not available'}\n"
+        f"Dependency Chain: {' -> '.join(analysis['dependency_chain']) if analysis['dependency_chain'] else 'Not available'}\n"
         f"Risk Level: {analysis['risk_level']}\n"
         f"Impact Score: {analysis['impact_score']}%\n"
-        f"Downstream Consequences: {analysis['downstream_consequences']}\n"
+        f"Risk Factors: {', '.join(analysis['factors'])}\n"
         f"Why: {analysis['why']}"
     )
 
@@ -789,7 +740,7 @@ def render_reports_page():
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "page" not in st.session_state:
-    st.session_state.page = "Dashboard"
+    st.session_state.page = "Change Analysis"
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
 
@@ -801,10 +752,11 @@ else:
         "Dashboard": render_dashboard,
         "Change Analysis": render_change_analysis_page,
         "Impact Results": render_impact_results_page,
+        "Dependency Graph": render_dependency_graph_page,
         "Risk Analysis": render_risk_analysis_page,
         "Risk Mitigation": render_risk_mitigation_page,
+        "AI Prediction": render_ai_prediction_page,
         "Reports": render_reports_page,
     }
     page_map.get(st.session_state.page, render_dashboard)()
-
     st.markdown('<div class="footer">⚡ Impact.AI • Engineering Change Intelligence</div>', unsafe_allow_html=True)
