@@ -11,16 +11,37 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-COMPONENTS_PATH = Path(__file__).resolve().parent / "data" / "components.csv"
 NO_DATA_MESSAGE = "Enter a change summary and component to begin impact analysis."
+DEFAULT_CHANGE_SUMMARY = "I want to change the login system of my website from password login to OTP login."
+DEFAULT_COMPONENT = "Authentication"
+
+
+def resolve_components_path():
+    base_dir = Path(__file__).resolve().parent
+    candidates = [
+        base_dir / "data" / "components.csv",
+        base_dir / "components.csv",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+COMPONENTS_PATH = resolve_components_path()
 
 
 def load_component_metadata():
-    if not COMPONENTS_PATH.exists():
+    path = resolve_components_path()
+    if not path.exists():
         return []
 
-    with open(COMPONENTS_PATH, "r", encoding="utf-8-sig", newline="") as handle:
-        return [row for row in csv.DictReader(handle) if row.get("component_name")]
+    try:
+        with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+            rows = [row for row in csv.DictReader(handle) if row.get("component_name")]
+        return rows
+    except Exception:
+        return []
 
 
 def normalize_risk(value):
@@ -40,6 +61,15 @@ def build_dependency_graph(rows):
             if dependency and dependency.lower() != "none":
                 graph.add_edge(component, dependency)
     return graph
+
+
+def get_risk_counts(rows):
+    counts = {"High": 0, "Medium": 0, "Low": 0}
+    for row in rows:
+        risk = normalize_risk(row.get("risk_level"))
+        if risk in counts:
+            counts[risk] += 1
+    return counts
 
 
 def collect_dependency_chain(component_name, graph):
@@ -70,8 +100,8 @@ def collect_downstream_chain(component_name, graph):
 
 
 def analyze_change_summary(change_summary, selected_component):
-    change_summary = (change_summary or "").strip()
-    selected_component = (selected_component or "").strip()
+    change_summary = (change_summary or DEFAULT_CHANGE_SUMMARY).strip()
+    selected_component = (selected_component or DEFAULT_COMPONENT).strip()
 
     if not change_summary or not selected_component:
         return None
@@ -517,7 +547,7 @@ def render_dashboard():
 
     columns = st.columns(4)
     with columns[0]:
-        render_metric_card("Systems", "8", "Architecture nodes in scope", "blue")
+        render_metric_card("Systems", str(len(load_component_metadata()) or 0), "Architecture nodes in scope", "blue")
     with columns[1]:
         render_metric_card("Critical Paths", "4", "Core dependency paths tracked", "red")
     with columns[2]:
@@ -530,10 +560,10 @@ def render_dashboard():
         st.markdown("### Latest Analysis Snapshot")
         st.markdown(
             f"<div class='panel'>"
-            f"<strong>Change Summary:</strong> {analysis['change_summary']}<br><br>"
-            f"<strong>Selected Component:</strong> {analysis['selected_component']}<br><br>"
-            f"<strong>Risk Level:</strong> {analysis['risk_level']} &nbsp;&nbsp;"
-            f"<strong>Impact Score:</strong> {analysis['impact_score']}%"
+            f"<strong>Change Summary:</strong> {analysis.get('change_summary', 'N/A')}<br><br>"
+            f"<strong>Selected Component:</strong> {analysis.get('selected_component', 'N/A')}<br><br>"
+            f"<strong>Risk Level:</strong> {analysis.get('risk_level', 'Medium')} &nbsp;&nbsp;"
+            f"<strong>Impact Score:</strong> {analysis.get('impact_score', 0)}%"
             f"</div>",
             unsafe_allow_html=True,
         )
@@ -548,11 +578,14 @@ def render_change_analysis_page():
     st.markdown('<div class="page-title">Describe the change you want to make to your website or software project.</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    default_change = st.session_state.get("default_change_summary", DEFAULT_CHANGE_SUMMARY)
+    default_component = st.session_state.get("default_component", DEFAULT_COMPONENT)
+
     with st.form("change_analysis_form"):
         st.markdown("### Change Summary")
         change_summary = st.text_area(
             label="",
-            value="",
+            value=default_change,
             placeholder="I want to move the login flow from password-based authentication to OTP verification.",
             help="Type the actual change you want to introduce.",
             label_visibility="collapsed",
@@ -560,7 +593,7 @@ def render_change_analysis_page():
 
         component_name = st.text_input(
             "Component to change",
-            value="",
+            value=default_component,
             placeholder="Authentication",
             help="Type the exact component affected by the change."
         )
@@ -568,12 +601,15 @@ def render_change_analysis_page():
         submitted = st.form_submit_button("Analyze Impact", use_container_width=True)
 
         if submitted:
-            if not change_summary.strip():
-                st.warning("Please enter a change summary before analyzing.")
-            elif not component_name.strip():
-                st.warning("Please type the component affected by the change.")
+            chosen_change = change_summary.strip() or DEFAULT_CHANGE_SUMMARY
+            chosen_component = component_name.strip() or DEFAULT_COMPONENT
+            st.session_state.default_change_summary = chosen_change
+            st.session_state.default_component = chosen_component
+            result = analyze_change_summary(chosen_change, chosen_component)
+            if result is None:
+                st.warning("Analysis could not be generated for the current input.")
             else:
-                st.session_state.analysis = analyze_change_summary(change_summary, component_name)
+                st.session_state.analysis = result
                 st.session_state.page = "Impact Results"
                 st.rerun()
 
@@ -590,35 +626,45 @@ def render_impact_results_page():
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("### Change Summary")
-    st.write(analysis["change_summary"])
-    st.write(f"**Selected Component:** {analysis['selected_component']}")
+    st.write(analysis.get("change_summary", "No summary available."))
+    st.write(f"**Selected Component:** {analysis.get('selected_component', 'Not selected')}")
 
     st.markdown("### Directly affected components")
-    for item in analysis["directly_affected"]:
-        st.write(f"• {item}")
+    direct_items = analysis.get("directly_affected", [])
+    if direct_items:
+        for item in direct_items:
+            st.write(f"• {item}")
+    else:
+        st.info("No directly affected components were identified.")
 
     st.markdown("### Indirectly affected components")
-    if analysis["indirectly_affected"]:
-        for item in analysis["indirectly_affected"]:
+    indirect_items = analysis.get("indirectly_affected", [])
+    if indirect_items:
+        for item in indirect_items:
             st.write(f"• {item}")
     else:
         st.info("No indirect downstream impact was detected.")
 
     st.markdown("### Dependency chain")
-    if analysis["dependency_chain"]:
-        st.code(" -> ".join(analysis["dependency_chain"]))
+    dependency_chain = analysis.get("dependency_chain", [])
+    if dependency_chain:
+        st.code(" -> ".join(dependency_chain))
     else:
         st.info("No dependency chain was available for the selected component.")
 
     st.markdown("### Why those components are affected")
-    for component, reason in analysis["component_reasons"].items():
-        st.write(f"• **{component}:** {reason}")
+    reasons = analysis.get("component_reasons", {})
+    if reasons:
+        for component, reason in reasons.items():
+            st.write(f"• **{component}:** {reason}")
+    else:
+        st.info("No detailed component rationale is available yet.")
 
 
 def render_dependency_graph_page():
-    analysis = st.session_state.get("analysis")
-    if not analysis:
-        st.info(NO_DATA_MESSAGE)
+    rows = load_component_metadata()
+    if not rows:
+        st.info("No component metadata is available. Please confirm that the CSV file exists and is readable.")
         return
 
     st.markdown('<div class="page-shell">', unsafe_allow_html=True)
@@ -626,16 +672,43 @@ def render_dependency_graph_page():
     st.markdown('<div class="page-title">Architecture path for the selected component</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.code(" -> ".join(analysis["dependency_chain"]))
-    st.write(f"**Selected component:** {analysis['selected_component']}")
-    st.write(f"**Directly affected:** {', '.join(analysis['directly_affected'])}")
-    st.write(f"**Indirectly affected:** {', '.join(analysis['indirectly_affected']) or 'None'}")
+    component_name = st.session_state.get("default_component", DEFAULT_COMPONENT)
+    if "analysis" in st.session_state and st.session_state.analysis:
+        component_name = st.session_state.analysis.get("selected_component", component_name)
+
+    graph = build_dependency_graph(rows)
+    selected_node = component_name if component_name in graph else DEFAULT_COMPONENT
+    dependency_chain = collect_dependency_chain(selected_node, graph)
+
+    st.write(f"**Selected component:** {selected_node}")
+    if dependency_chain:
+        st.code(" -> ".join(dependency_chain))
+    else:
+        st.info("No dependency chain is available for the selected component.")
+
+    st.markdown("### Dependency relationships")
+    for row in rows:
+        component = str(row.get("component_name", "")).strip()
+        dependency = str(row.get("dependency", "")).strip()
+        if component and dependency and dependency.lower() != "none":
+            st.write(f"• **{component}** depends on **{dependency}**")
+
+    if not any(row.get("dependency") for row in rows):
+        st.warning("The CSV has no dependency values defined for the current project data.")
 
 
 def render_risk_analysis_page():
     analysis = st.session_state.get("analysis")
+    rows = load_component_metadata()
+    risk_counts = get_risk_counts(rows)
+
     if not analysis:
         st.info(NO_DATA_MESSAGE)
+        if rows:
+            st.markdown("### Current component risk distribution")
+            st.write(f"**High:** {risk_counts.get('High', 0)}")
+            st.write(f"**Medium:** {risk_counts.get('Medium', 0)}")
+            st.write(f"**Low:** {risk_counts.get('Low', 0)}")
         return
 
     st.markdown('<div class="page-shell">', unsafe_allow_html=True)
@@ -643,18 +716,29 @@ def render_risk_analysis_page():
     st.markdown('<div class="page-title">Technology risk and execution exposure</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
+    selected_component = analysis.get("selected_component", DEFAULT_COMPONENT)
+    selected_risk = normalize_risk(next((row.get("risk_level") for row in rows if str(row.get("component_name", "")).strip() == selected_component), "Medium"))
+
     cols = st.columns(2)
     with cols[0]:
-        render_metric_card("Risk Level", analysis["risk_level"], "Priority classification", "red")
+        render_metric_card("Risk Level", analysis.get("risk_level", "Medium"), "Priority classification", "red")
     with cols[1]:
-        render_metric_card("Impact Score", f"{analysis['impact_score']}%", "Estimated business and system impact", "green")
+        render_metric_card("Impact Score", f"{analysis.get('impact_score', 0)}%", "Estimated business and system impact", "green")
 
     st.markdown("### Risk factors")
-    for item in analysis["factors"]:
+    for item in analysis.get("factors", ["No risk factors available."]):
         st.write(f"• {item}")
 
+    st.markdown("### Selected component risk")
+    st.write(f"**{selected_component}:** {selected_risk}")
+
+    st.markdown("### High / Medium / Low counts")
+    st.write(f"**High:** {risk_counts.get('High', 0)}")
+    st.write(f"**Medium:** {risk_counts.get('Medium', 0)}")
+    st.write(f"**Low:** {risk_counts.get('Low', 0)}")
+
     st.markdown("### Explanation of calculated risk")
-    st.write(analysis["why"])
+    st.write(analysis.get("why", "No risk explanation is available yet."))
 
 
 def render_risk_mitigation_page():
@@ -669,8 +753,12 @@ def render_risk_mitigation_page():
     st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("### Ways to reduce risk")
-    for step in analysis.get("mitigation", []):
-        st.write(f"• {step}")
+    mitigations = analysis.get("mitigation", [])
+    if mitigations:
+        for step in mitigations:
+            st.write(f"• {step}")
+    else:
+        st.info("No mitigation guidance is available for the current analysis.")
 
     st.markdown("### Testing recommendations")
     st.write("• Run targeted regression tests on the selected component and each downstream dependent service.")
@@ -696,12 +784,12 @@ def render_ai_prediction_page():
     st.markdown('<div class="page-title">Predicted change impact outlook</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.write(f"**Selected Component:** {analysis['selected_component']}")
-    st.write(f"**Change Summary:** {analysis['change_summary']}")
-    st.write(f"**Directly Affected:** {', '.join(analysis['directly_affected']) or 'None'}")
-    st.write(f"**Indirectly Affected:** {', '.join(analysis['indirectly_affected']) or 'None'}")
-    st.write(f"**Risk Level:** {analysis['risk_level']}")
-    st.write(f"**Impact Score:** {analysis['impact_score']}%")
+    st.write(f"**Selected Component:** {analysis.get('selected_component', 'Not selected')}")
+    st.write(f"**Change Summary:** {analysis.get('change_summary', 'No summary available.')}")
+    st.write(f"**Directly Affected:** {', '.join(analysis.get('directly_affected', [])) or 'None'}")
+    st.write(f"**Indirectly Affected:** {', '.join(analysis.get('indirectly_affected', [])) or 'None'}")
+    st.write(f"**Risk Level:** {analysis.get('risk_level', 'Medium')}")
+    st.write(f"**Impact Score:** {analysis.get('impact_score', 0)}%")
 
 
 def render_reports_page():
@@ -715,24 +803,31 @@ def render_reports_page():
     st.markdown('<div class="page-title">Final impact analysis report</div>', unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
-    report_text = (
-        f"Change Summary: {analysis['change_summary']}\n"
-        f"Selected Component: {analysis['selected_component']}\n"
-        f"Directly Affected: {', '.join(analysis['directly_affected']) or 'None'}\n"
-        f"Indirectly Affected: {', '.join(analysis['indirectly_affected']) or 'None'}\n"
-        f"Dependency Chain: {' -> '.join(analysis['dependency_chain']) if analysis['dependency_chain'] else 'Not available'}\n"
-        f"Risk Level: {analysis['risk_level']}\n"
-        f"Impact Score: {analysis['impact_score']}%\n"
-        f"Risk Factors: {', '.join(analysis['factors'])}\n"
-        f"Why: {analysis['why']}"
+    report_rows = [
+        ["Change Summary", analysis.get("change_summary", "N/A")],
+        ["Selected Component", analysis.get("selected_component", "Not selected")],
+        ["Directly Affected", ", ".join(analysis.get("directly_affected", [])) or "None"],
+        ["Indirectly Affected", ", ".join(analysis.get("indirectly_affected", [])) or "None"],
+        ["Dependency Chain", " -> ".join(analysis.get("dependency_chain", [])) if analysis.get("dependency_chain") else "Not available"],
+        ["Risk Level", analysis.get("risk_level", "Medium")],
+        ["Impact Score", f"{analysis.get('impact_score', 0)}%"],
+        ["Risk Factors", ", ".join(analysis.get("factors", []))],
+        ["Why", analysis.get("why", "No explanation available.")],
+    ]
+
+    csv_content = "Change Summary,Selected Component,Directly Affected,Indirectly Affected,Dependency Chain,Risk Level,Impact Score,Risk Factors,Why\n"
+    csv_content += "\n".join(
+        [
+            ',"'.join(str(value).replace('"', '""') for value in row) + '"' for row in report_rows
+        ]
     )
 
-    st.code(report_text)
+    st.code("\n".join(f"{label}: {value}" for label, value in report_rows))
     st.download_button(
-        label="Download report",
-        data=report_text,
-        file_name="impact_ai_change_report.txt",
-        mime="text/plain",
+        label="Download CSV report",
+        data=csv_content,
+        file_name="impact_ai_change_report.csv",
+        mime="text/csv",
         use_container_width=True,
     )
 
