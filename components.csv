@@ -1,0 +1,9 @@
+component_id,component_name,system,dependency,risk_level
+C001,Authentication,Backend,Database,High
+C002,User Management,Backend,Authentication,Medium
+C003,Payment Gateway,Backend,Database,High
+C004,Dashboard,Frontend,User Management,Medium
+C005,Notification,Backend,User Management,Low
+C006,Database,Infrastructure,None,High
+C007,API Gateway,Backend,Authentication,High
+C008,Reporting,Frontend,Database,Medium
